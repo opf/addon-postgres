@@ -6,15 +6,18 @@ set -e
 
 ADDON_VERSION="v1"
 
-MSG_CONFLICTING_INSTALL="ERROR: It seems like you already have PostgreSQL v10 installed. Please run '$APP_NAME reconfigure' and choose to use the existing installation instead."
+MSG_CONFLICTING_INSTALL="ERROR: It seems like you already have PostgreSQL installed. Please run '$APP_NAME reconfigure' and choose to use the existing installation instead."
 MSG_UNKNOWN_DISTRIBUTION_VERSION="ERROR: The current distribution is not supported by this wizard. Please install PostgreSQL manually and retry."
 MSG_CONNECTION_KO="ERROR: Connection KO. Aborting postgres installation. You should check the wizard configuration in /etc/$APP_NAME/installer.dat"
+MSG_PGVECTOR_FAILED="WARNING: Could not install pgvector. Features that depend on it stay disabled. See https://www.openproject.org/docs/installation-and-operations/system-requirements/#pgvector"
 
 PGHOST="$(wiz_get "postgres/db_host" || echo "127.0.0.1")"
 PGPORT="$(wiz_get "postgres/db_port" || echo "5432")"
 PGDATABASE="$(wiz_get "postgres/db_name" || echo "$APP_SAFE_NAME")"
 PGUSER="$(wiz_get "postgres/db_username" || echo "$APP_SAFE_NAME")"
 PGPASSWORD="$(wiz_get "postgres/db_password" || echo "")"
+
+CONF_FILE="/etc/${APP_NAME}/conf.d/00_addon_postgres"
 
 install_postgres_server() {
 	case $(wiz_fact "osfamily") in
@@ -34,7 +37,10 @@ install_postgres_server() {
 					;;
 				"11")
 					codename="bullseye"
-					;;					
+					;;
+				"12")
+					codename="bookworm"
+					;;
 				"14.04")
 					codename="trusty"
 					;;
@@ -47,26 +53,28 @@ install_postgres_server() {
 				"20.04")
 					codename="focal"
 					;;
+				"22.04")
+					codename="jammy"
+					;;
 			esac
 
-			if [ "$codename" != "" ]; then
-				if ! wiz_check_package "postgresql-10" ; then
-					_ensure_port_available
-					echo "deb https://apt.postgresql.org/pub/repos/apt/ ${codename}-pgdg main" > /etc/apt/sources.list.d/pgdg.list
-					echo -n "INFO: Adding repository signing key from PostgreSQL... "
-					wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
-					echo "INFO: Installing PostgreSQL v10..."
-					apt-get update -qq
-					DEBIAN_FRONTEND=noninteractive apt-get install postgresql-10 -y
+		if [ "$codename" != "" ]; then
+			if ! wiz_check_package "postgresql-18" ; then
+				_ensure_port_available
+				echo "deb https://apt.postgresql.org/pub/repos/apt/ ${codename}-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+				echo -n "INFO: Adding repository signing key from PostgreSQL... "
+				wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+				echo "INFO: Installing PostgreSQL v18..."
+				apt-get update -qq
+				DEBIAN_FRONTEND=noninteractive apt-get install postgresql-18 postgresql-18-pgvector -y
 
-					su - postgres -c "/usr/lib/postgresql/10/bin/pg_ctl -D /var/lib/postgresql/10/main -w -t 10 stop || true"
-					_configure_postgres_server "/etc/postgresql/10/main"
-					sleep 3
-					su - postgres -c "/usr/lib/postgresql/10/bin/pg_ctl -D /var/lib/postgresql/10/main -w -t 10 -l logfile restart"
-				else
-					_error_if_conflicting_install
-				fi
-				_configure_database_and_user
+				pg_ctlcluster 18 main stop || true
+				_configure_postgres_server "/etc/postgresql/18/main"
+				pg_ctlcluster 18 main start
+			else
+				_error_if_conflicting_install
+			fi
+			_configure_database_and_user
 			else
 				echo "$MSG_UNKNOWN_DISTRIBUTION_VERSION"
 				exit 1
@@ -75,69 +83,41 @@ install_postgres_server() {
 		"redhat")
 			case $(wiz_fact "osversion") in
 				7*)
-					if ! wiz_check_package "postgresql10-server" ; then
-						_ensure_port_available
-						echo "INFO: Installing PostgreSQL v10..."
-						yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-7-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-						yum install -y postgresql10-server postgresql10
-						PGSETUP_INITDB_OPTIONS="--auth-local peer --auth-host md5" /usr/pgsql-10/bin/postgresql-10-setup initdb
-
-						_configure_postgres_server "/var/lib/pgsql/10/data"
-						systemctl enable postgresql-10
-						systemctl restart postgresql-10
-					else
-						_error_if_conflicting_install
-					fi
-					_configure_database_and_user
+					repo="https://download.postgresql.org/pub/repos/yum/reporpms/EL-7-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
 					;;
 				8*)
-					if ! wiz_check_package "postgresql10-server" ; then
-						_ensure_port_available
-						set -x
-						echo "INFO: Installing PostgreSQL v10..."
-						dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-						dnf -qy module disable postgresql
-						dnf install -y postgresql10 postgresql10-server
-						PGSETUP_INITDB_OPTIONS="--auth-local peer --auth-host md5" /usr/pgsql-10/bin/postgresql-10-setup initdb
-
-						_configure_postgres_server "/var/lib/pgsql/10/data"
-						systemctl enable postgresql-10
-						systemctl restart postgresql-10
-					else
-						_error_if_conflicting_install
-					fi
-					_configure_database_and_user
+					repo="https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+					dnf -qy module disable postgresql
+					;;
+				9*)
+					repo="http://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+					dnf -qy module disable postgresql
 					;;
 				*)
 					echo "$MSG_UNKNOWN_DISTRIBUTION_VERSION"
 					exit 1
 					;;
 			esac
+
+		if ! wiz_check_package "postgresql18-server" ; then
+			_ensure_port_available
+			echo "INFO: Installing PostgreSQL v18..."
+			yum install -y "$repo"
+			yum install -y postgresql18-server postgresql18 postgresql18-contrib pgvector_18
+			PGSETUP_INITDB_OPTIONS="--auth-local peer --auth-host md5" /usr/pgsql-18/bin/postgresql-18-setup initdb
+
+			_configure_postgres_server "/var/lib/pgsql/18/data"
+			wiz_service_enable postgresql-18
+			wiz_service_restart postgresql-18
+		else
+			_error_if_conflicting_install
+		fi
+			_configure_database_and_user
+
 			;;
 		"suse")
-			case $(wiz_fact "osversion") in
-				12)
-					if ! wiz_check_package "postgresql10-server" ; then
-						 _ensure_port_available
-						rpm --import https://download.postgresql.org/pub/repos/zypp/10/suse/sles-12-x86_64/repodata/repomd.xml.key
-						echo "INFO: Installing PostgreSQL v10..."
-						zypper addrepo https://download.postgresql.org/pub/repos/zypp/repo/pgdg-sles-10.repo
-						zypper install -y postgresql10-server
-
-						PGSETUP_INITDB_OPTIONS="--auth-local peer --auth-host md5" /usr/pgsql-10/bin/postgresql-10-setup initdb
-						_configure_postgres_server "/var/lib/pgsql/10/data"
-						systemctl enable postgresql-10
-						systemctl restart postgresql-10
-					else
-						_error_if_conflicting_install
-					fi
-					_configure_database_and_user
-					;;
-				*)
-					echo "$MSG_UNKNOWN_DISTRIBUTION_VERSION"
-					exit 1
-					;;
-			esac
+			echo "$MSG_UNKNOWN_DISTRIBUTION_VERSION"
+			exit 1
 			;;
 	esac
 }
@@ -191,14 +171,36 @@ function _configure_postgres_server() {
 	chown -R postgres:postgres $base_dir/conf.d
 }
 
+function _install_pgvector() {
+	local major
+	major="$(su - postgres -c "psql -p $PGPORT --no-readline -tAc \"SELECT current_setting('server_version_num')::int / 10000\"")" || { echo "$MSG_PGVECTOR_FAILED"; return 0; }
+
+	echo "INFO: Installing pgvector for PostgreSQL v${major}..."
+	case "$(wiz_fact "osfamily")" in
+		"debian")
+			wiz_check_package "postgresql-${major}-pgvector" || DEBIAN_FRONTEND=noninteractive apt-get install -y "postgresql-${major}-pgvector"
+			;;
+		"redhat")
+			wiz_check_package "pgvector_${major}" || yum install -y "pgvector_${major}"
+			;;
+	esac || echo "$MSG_PGVECTOR_FAILED"
+}
+
 function _configure_database_and_user() {
 	if su - postgres -c "createuser -p $PGPORT --createdb --login --superuser $PGUSER 2>&1 || true" | grep -q "already exists" ; then
 		echo "INFO: user $PGUSER already exists"
 	fi
 	su - postgres -c "psql -p $PGPORT --no-readline --no-password -c \"alter user $PGUSER with encrypted password '$PGPASSWORD';\""
 
-	if su - postgres -c "createdb -p $PGPORT -O $PGUSER $PGDATABASE 2>&1 || true" | grep -q "already exists" ; then
+	local database_exists
+	database_exists=$(runuser -u postgres -- psql -p "$PGPORT" -d postgres -At -v ON_ERROR_STOP=1 -v database="$PGDATABASE" <<'SQL'
+SELECT 1 FROM pg_database WHERE datname = :'database';
+SQL
+)
+	if [ "$database_exists" = 1 ]; then
 		echo "INFO: database $PGDATABASE already exists"
+	else
+		runuser -u postgres -- createdb -p "$PGPORT" -O "$PGUSER" -- "$PGDATABASE"
 	fi
 }
 
@@ -207,10 +209,16 @@ case "$(wiz_get "postgres/autoinstall")" in
 		echo "INFO: autoinstall=skip. Skipping to next step."
 		;;
 	"install")
-		echo "INFO: autoinstall=install. A new PostgreSQL v10 server will be installed locally unless a conflicting installation is found."
-		install_postgres_server
-		wiz_set "postgres/addon_version" "$ADDON_VERSION"
-		_ensure_connection_ok
+		echo "INFO: autoinstall=install. A new PostgreSQL v18 server will be installed locally unless a conflicting installation is found."
+		if [ -f "$CONF_FILE" ]; then
+			echo "INFO: existing installation found. Skipping to next step."
+			_ensure_connection_ok
+		else
+			install_postgres_server
+			wiz_set "postgres/addon_version" "$ADDON_VERSION"
+			_ensure_connection_ok
+		fi
+		_install_pgvector
 		;;
 	"reuse")
 		echo "INFO: autoinstall=reuse. Skipping to next step."
